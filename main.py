@@ -10,12 +10,10 @@ import support
 
 
 # Ваши данные из браузера
-USER_TOKEN = "YZEXdR+dfME4Co9Scd43+aC0j6Yf4LbziqgmlGvYfnu1m+TmWujgjkx/EaDTcj2Q"
-DS_SESSION_ID = "c6b9b9c7b8f5474380e63a12586bc489"
 
 
 class DeepSeek_API:
-    def __init__(self, user_token: str = USER_TOKEN, session_cookie: str = DS_SESSION_ID) -> None:
+    def __init__(self, user_token: str, session_cookie: str) -> None:
 
         self.memory = {}
         self.ans = None
@@ -160,11 +158,11 @@ class DeepSeek_API:
 
 
 
-if __name__ == "__main__":
-    challenge = DeepSeek_API()
-    challenge.creat_session()
-    print(challenge.send_message("топ LLM"))
-    print(challenge.send_message("опиши критерии оценки"))
+# if __name__ == "__main__":
+#     challenge = DeepSeek_API()
+#     challenge.creat_session()
+#     print(challenge.send_message("топ LLM"))
+#     print(challenge.send_message("опиши критерии оценки"))
 
 
 

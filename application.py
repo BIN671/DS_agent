@@ -1,4 +1,6 @@
 import sys
+
+import secret
 from main import DeepSeek_API
 from support import prompt
 import traceback
@@ -124,8 +126,8 @@ class WorkspacePage(QWidget):
         try:
             print(0)
             self.api = DeepSeek_API(
-                "YZEXdR+dfME4Co9Scd43+aC0j6Yf4LbziqgmlGvYfnu1m+TmWujgjkx/EaDTcj2Q",
-                "c6b9b9c7b8f5474380e63a12586bc489"
+                secret.USER_TOKEN,
+                secret.DS_SESSION_ID
             )
             self.api.creat_session()
             ans = self.api.send_message(prompt)
