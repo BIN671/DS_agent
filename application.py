@@ -1,6 +1,6 @@
 import sys
 
-import secret
+
 import support
 from main import DeepSeek_API
 from support import prompt
@@ -12,6 +12,13 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QMenu
 )
 from PySide6.QtCore import Qt, QThread, Signal
+
+
+
+try:
+    import secret_local as secret
+except ImportError:
+    import secret_example as secret
 
 
 # =============================================================
