@@ -44,16 +44,15 @@ def parse_sse_response(response) -> tuple[str, int | None]:
 
 def extract(text: str):
     # 1. Убираем известный префикс, если он есть
-    if text.startswith("ABCD"):
-        text = text[4:]
+    if text.startswith("SEARCH"):
+        text = text[6:]
     # 2. Убираем известный суффикс
-    if text.endswith("EF"):
-        text = text[:-2]
+    if text.endswith("FINISHED"):
+        text = text[:-8]
     # 3. Парсим
     return json.loads(text)
 
-print(extract('ABCD{"A": 1}EF'))   # {'A': 1}
-print(extract('{"A": 1}EF'))       # {'A': 1}
+
 
 
 prompt = """
@@ -195,10 +194,3 @@ args: { "path": "путь", "content": "содержимое" }
 4. Не выдумывай результаты команд — жди фактического вывода.
 5. Максимум 30 шагов на задачу.
 """
-
-
-executors_table = {
-    "bash": executors.bash,
-    "read": executors.read,
-    "write": executors.write
-}

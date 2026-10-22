@@ -2,7 +2,7 @@ import httpx
 import json
 import base64
 import traceback
-
+import executors
 
 import POW
 import support
@@ -17,7 +17,7 @@ class DeepSeek_API:
 
         self.memory = {}
         self.ans = None
-        self.executors_table = support.executors_table
+        self.executors_table = executors.executors_table
 
 
 
@@ -124,11 +124,12 @@ class DeepSeek_API:
 
     def execute(self):
         answer_data = support.extract(self.ans)
-        text = answer_data.get("text")
+        #text = answer_data.get("text")
         tools = answer_data.get("tools")
         status = answer_data.get("status")
         return_data = ""
         indx = None
+        key = None
         try:
             for indx, tool in enumerate(tools):
                 name = tool.get("name")
@@ -152,6 +153,8 @@ class DeepSeek_API:
         except Exception:
             return_data = f'ошибка в памяти по ключу {key}: {traceback.format_exc()}'
             status = "continue"
+
+            print(11)
 
         return status, return_data
 

@@ -1,6 +1,7 @@
 import sys
 
 import secret
+import support
 from main import DeepSeek_API
 from support import prompt
 import traceback
@@ -19,6 +20,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 class MessageWorker(QThread):
     answer = Signal(str)
     error = Signal(str)
+    answer_text = Signal(str)
 
     def __init__(self, api, text: str, parent=None):
         super().__init__(parent)
@@ -30,10 +32,13 @@ class MessageWorker(QThread):
             while True:
                 ans = self._api.send_message(self._text)
                 self.answer.emit(ans)
+                self.answer_text.emit(support.extract(ans).get("text"))
                 response = self._api.execute()
                 if response[0] != "continue":
                     break
-                self._text = response[1]
+                self._text = f"{response[0]}: {response[1]}"
+                self.answer.emit(self._text)
+                #print(self._text)
 
 
 
@@ -53,6 +58,7 @@ class WorkspacePage(QWidget):
         self.title = title
         self.api = None
         self._worker = None
+        self.msg_counter = 0
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_start_screen())   # 0 — Start
@@ -98,6 +104,10 @@ class WorkspacePage(QWidget):
         self.entry.returnPressed.connect(self.on_enter)
         left_layout.addWidget(self.entry)
         left_layout.addStretch()
+
+        self.output_text = QTextEdit()
+        self.output_text.setReadOnly(True)
+        left_layout.addWidget(self.output_text)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -155,24 +165,35 @@ class WorkspacePage(QWidget):
 
         self.entry.setEnabled(False)
         self.entry.setPlaceholderText("Ожидание ответа...")
-        self.output.append(f"> {text}:\n")
+        self.output.append(f">Пользователь:\n {text}:\n\n")
+        self.output_text.append(f">Пользователь:\n {text}:\n\n")
 
         self._worker = MessageWorker(self.api, text, parent=self)
         self._worker.answer.connect(self._on_message_answer)
+        self._worker.answer_text.connect(self._on_message_answer_text)
         self._worker.error.connect(self._on_message_error)
         self._worker.finished.connect(self._cleanup_worker)
         self._worker.start()
 
     def _on_message_answer(self, ans: str):
-        self.output.append(f"> {ans}\n\n")
+        self.output.append(f">DeepSeek:\n {ans}\n")
 
     def _on_message_error(self, msg: str):
-        self.output.append(f"> [Ошибка] {msg}\n\n")
+        self.output.append(f"> [Ошибка]:\n {msg}\n")
+
+    def _on_message_answer_text(self, ans_text: str):
+        self.msg_counter += 1
+        if self.msg_counter <2:
+            self.output_text.append(f">DeepSeek:\n {ans_text}\n")
+        else:
+            self.output_text.append(f"{ans_text}\n\n")
 
     def _cleanup_worker(self):
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+        self.msg_counter = 0
+        self.output_text.append("\n\n")
         self.entry.setEnabled(True)
         self.entry.setPlaceholderText("Введите текст и нажмите Enter...")
         self.entry.clear()
