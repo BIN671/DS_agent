@@ -135,8 +135,10 @@ class DeepSeek_API:
                 name = tool.get("name")
                 func = self.executors_table.get(name)
                 args_data = tool.get("args")
-                mem = func(**args_data)
-                self.memory[tool.get("save_as")] = mem
+                cwd = tool.get("cwd")
+                mem = func(cwd)(**args_data)
+                if (tool.get("save_as")):
+                    self.memory[tool.get("save_as")] = mem
 
 
         except Exception:
