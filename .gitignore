@@ -1,1 +1,7 @@
 secret_local.py
+venv/
+__pycache__/
+*.pyc
+settings.json
+*.bak
+.idea/

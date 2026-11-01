@@ -404,13 +404,15 @@ class MessageWorker(QThread):
         try:
             while True:
                 ans = self._api.send_message(self._text)
-                self.answer.emit(ans)
+                print("step1")
+                self.answer.emit(f"deepseek: {ans}")
                 self.answer_text.emit(support.extract(ans).get("text", ""))
+                print("step2")
                 response = self._api.execute()
                 if response[0] != "continue":
                     break
                 self._text = f"{response[0]}: {response[1]}"
-                self.answer.emit(self._text)
+                self.answer.emit(f"system: {self._text}")
         except Exception as e:
             self.error.emit(str(e))
 
@@ -785,10 +787,12 @@ class WorkspacePage(QWidget):
 
     def _on_message_answer(self, ans: str):
         self.output.append(f"> DeepSeek:\n{ans}\n")
+        print("er1")
 
     def _on_message_error(self, msg: str):
         self.output.append(f"> [Ошибка]:\n{msg}\n")
         self._add_note(f"Ошибка: {msg}", C.danger)
+        print("er")
 
     def _on_message_answer_text(self, ans_text: str):
         if not ans_text:

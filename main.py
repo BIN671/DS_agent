@@ -2,24 +2,22 @@ import httpx
 import json
 import base64
 import traceback
-import executors
 
+import executors
 import POW
 import support
 
 
-
-# Ваши данные из браузера
+# Значения по умолчанию; могут быть переопределены извне (settings.json)
+DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_MAX_STEPS = 30
 
 
 class DeepSeek_API:
     def __init__(self, user_token: str, session_cookie: str) -> None:
-
         self.memory = {}
         self.ans = None
         self.executors_table = executors.executors_table
-
-
 
         self.solver = POW.DeepSeekPoWSolver()
         self.model = "default"
@@ -28,6 +26,11 @@ class DeepSeek_API:
         self.user_token = user_token
         self.session_cookie = session_cookie
         self.base_url = "https://chat.deepseek.com"
+
+        self.api_timeout = DEFAULT_TIMEOUT_S
+        self.max_steps = DEFAULT_MAX_STEPS
+        self._step_count = 0
+
         self.headers = {
             "Authorization": f"Bearer {self.user_token}",
             "Content-Type": "application/json",
@@ -36,58 +39,95 @@ class DeepSeek_API:
             "Origin": "https://chat.deepseek.com",
             "Referer": "https://chat.deepseek.com/",
             "Accept": "*/*",
-            # Заголовки клиента
             "x-client-version": "2.5.0",
             "x-client-platform": "web",
             "x-client-bundle-id": "com.deepseek.chat",
             "x-client-locale": "ru",
-            # Заголовки безопасности
             "sec-ch-ua": '"Microsoft Edge";v="155", "Chromium";v="155", "Not(A:Brand";v="24"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin"
+            "sec-fetch-site": "same-origin",
         }
 
-
-        self.client = httpx.Client(http2=True, headers=self.headers)
-
-    def creat_session(self):
-        respon = self.client.post(
-            f"{self.base_url}/api/v0/chat_session/create",
-            json={}
+        self.client = httpx.Client(
+            http2=True,
+            headers=self.headers,
+            timeout=self.api_timeout,
         )
 
-        if respon.status_code == 200:
-            print(respon.status_code)
-            data = respon.json()
-            self.session_id = data.get("data", {}).get("biz_data", {}).get("chat_session", {}).get("id")
+    # ---- настройки ----
+    def apply_settings(self, settings: dict) -> None:
+        """Применяет словарь настроек (api_timeout, max_steps)."""
+        if not settings:
+            return
+        try:
+            self.api_timeout = float(settings.get("api_timeout", self.api_timeout))
+        except (TypeError, ValueError):
+            pass
+        try:
+            self.max_steps = int(settings.get("max_steps", self.max_steps))
+        except (TypeError, ValueError):
+            pass
+        self.client.timeout = httpx.Timeout(self.api_timeout)
 
+    # ---- сессия ----
+    def create_session(self):
+        response = self.client.post(
+            f"{self.base_url}/api/v0/chat_session/create",
+            json={},
+        )
+        if response.status_code == 200:
+            data = response.json()
+            self.session_id = (
+                data.get("data", {})
+                .get("biz_data", {})
+                .get("chat_session", {})
+                .get("id")
+            )
+            return self.session_id
+
+        raise RuntimeError(
+            f"Не удалось создать сессию: HTTP {response.status_code} "
+            f"{response.text[:300]}"
+        )
+
+    # обратная совместимость с прежним именем
+    def creat_session(self):
+        return self.create_session()
+
+    # ---- PoW ----
     def get_pow_challenge(self):
         target_path: str = "/api/v0/chat/completion"
-        respon = self.client.post(
+        response = self.client.post(
             f"{self.base_url}/api/v0/chat/create_pow_challenge",
-            json={"target_path": target_path}
+            json={"target_path": target_path},
         )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"PoW challenge failed: HTTP {response.status_code} "
+                f"{response.text[:300]}"
+            )
 
-        if respon.status_code == 200:
-            data = respon.json()
-            challenge_data = data.get("data", {}).get("biz_data", {}).get("challenge")
+        data = response.json()
+        challenge_data = data.get("data", {}).get("biz_data", {}).get("challenge")
+        if not challenge_data:
+            raise RuntimeError("PoW challenge пуст в ответе API")
 
-            answer = self.solver.solve(challenge_data)
-            payload = {
-                "algorithm": challenge_data["algorithm"],
-                "challenge": challenge_data["challenge"],
-                "salt": challenge_data["salt"],
-                "answer": answer,
-                "signature": challenge_data["signature"],
-                "target_path": challenge_data["target_path"]
-            }
+        answer = self.solver.solve(challenge_data)
+        payload = {
+            "algorithm": challenge_data["algorithm"],
+            "challenge": challenge_data["challenge"],
+            "salt": challenge_data["salt"],
+            "answer": answer,
+            "signature": challenge_data["signature"],
+            "target_path": challenge_data["target_path"],
+        }
+        raw_json = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return base64.b64encode(raw_json).decode("utf-8")
 
-            raw_json = json.dumps(payload, separators=(',', ':')).encode('utf-8')
-            return base64.b64encode(raw_json).decode('utf-8')
-
+    # ---- отправка сообщения ----
     def send_message(self, prompt):
         pow_header = self.get_pow_challenge()
         extra_header = {"x-ds-pow-response": pow_header}
@@ -101,77 +141,85 @@ class DeepSeek_API:
             "search_enabled": True,
             "action": None,
             "preempt": False,
-            "model_type": self.model
+            "model_type": self.model,
         }
-        self.model = None
-        full_response = ""
+        # после первого запроса модель фиксируется как строка, а не None
+        self.model = self.model or "default"
 
         with self.client.stream(
-                "POST",
-                f"{self.base_url}/api/v0/chat/completion",
-                headers=extra_header,
-                json=payload
+            "POST",
+            f"{self.base_url}/api/v0/chat/completion",
+            headers=extra_header,
+            json=payload,
         ) as response:
             if response.status_code != 200:
-                print(f"❌ Ошибка HTTP: {response.status_code}")
-                print(response.read().decode('utf-8'))
-                return ""
+                body = response.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"HTTP {response.status_code}: {body[:500]}")
 
             self.ans, self.pre_message_id = support.parse_sse_response(response)
-
             return self.ans
 
-
+    # ---- исполнение инструментов ----
     def execute(self):
-        answer_data = support.extract(self.ans)
-        #text = answer_data.get("text")
-        tools = answer_data.get("tools")
+        if self.ans is None:
+            return "error", "Нет ответа модели для разбора"
+
+        try:
+            answer_data = support.extract(self.ans)
+        except Exception:
+            return (
+                "continue",
+                "не удалось разобрать ответ модели как JSON: "
+                + traceback.format_exc(),
+            )
+
+        if not isinstance(answer_data, dict):
+            return "error", "Ответ модели не является JSON-объектом"
+
         status = answer_data.get("status")
+        tools = answer_data.get("tools") or []
+        return_keys = answer_data.get("return") or []
+
+        self._step_count += 1
+        if self.max_steps and self._step_count > self.max_steps:
+            self._step_count = 0
+            return "error", f"Превышен лимит шагов ({self.max_steps})"
+
         return_data = ""
+
+        # --- инструменты ---
         indx = None
-        key = None
         try:
             for indx, tool in enumerate(tools):
                 name = tool.get("name")
-                func = self.executors_table.get(name)
-                args_data = tool.get("args")
+                func_factory = self.executors_table.get(name)
+                if func_factory is None:
+                    raise KeyError(f"Неизвестный инструмент: {name!r}")
+
+                args_data = tool.get("args") or {}
                 cwd = tool.get("cwd")
-                mem = func(cwd)(**args_data)
-                if (tool.get("save_as")):
-                    self.memory[tool.get("save_as")] = mem
+                result = func_factory(cwd)(**args_data)
 
-
+                save_as = tool.get("save_as")
+                if save_as:
+                    self.memory[save_as] = result
         except Exception:
-            return_data = f'ошибка в команде {indx}: {traceback.format_exc()}'
-            status = "continue"
+            return (
+                "continue",
+                f"ошибка в команде {indx}: " + traceback.format_exc(),
+            )
 
-            return status, return_data
+        # --- память ---
+        missing = [k for k in return_keys if k not in self.memory]
+        if missing:
+            return (
+                "continue",
+                f"ошибка в памяти: ключи не найдены {missing}",
+            )
+        for key in return_keys:
+            return_data += self.memory[key]
 
-
-        try:
-            return_keys = answer_data.get("return")
-            for key in return_keys:
-                return_data += self.memory[key]
-        except Exception:
-            return_data = f'ошибка в памяти по ключу {key}: {traceback.format_exc()}'
-            status = "continue"
-
-            print(11)
+        if status == "done":
+            self._step_count = 0
 
         return status, return_data
-
-
-
-
-# if __name__ == "__main__":
-#     challenge = DeepSeek_API()
-#     challenge.creat_session()
-#     print(challenge.send_message("топ LLM"))
-#     print(challenge.send_message("опиши критерии оценки"))
-
-
-
-"""
-
-
-"""

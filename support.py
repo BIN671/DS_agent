@@ -1,58 +1,76 @@
 import json
 
-import executors
-
 
 def parse_sse_response(response) -> tuple[str, int | None]:
     full_response = ""
     message_id = None
 
-    for line in response.iter_lines():
-        if not line or not line.startswith("data: "):
-            continue
+    try:
+        lines = response.iter_lines()
+    except Exception:
+        return full_response, message_id
 
-        data_str = line[6:]
-        if data_str == "[DONE]":
-            break
+    try:
+        for line in lines:
+            if not line or not line.startswith("data: "):
+                continue
 
-        try:
-            chunk = json.loads(data_str)
-            v_data = chunk.get("v", {})
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                break
 
-            # 1. Собираем текст
-            if isinstance(v_data, str):
-                full_response += v_data
-            elif isinstance(v_data, dict):
-                fragments = v_data.get("response", {}).get("fragments", [])
-                for frag in fragments:
-                    if frag.get("type") == "RESPONSE":
-                        full_response += frag.get("content", "")
+            try:
+                chunk = json.loads(data_str)
+                v_data = chunk.get("v", {})
 
-                # 2. Пытаемся вытащить ID сообщения (для контекста)
-                response_data = v_data.get("response", {})
-                if "message_id" in response_data:
-                    message_id = response_data["message_id"]
-                elif "id" in v_data:
-                    message_id = v_data["id"]
+                if isinstance(v_data, str):
+                    full_response += v_data
+                elif isinstance(v_data, dict):
+                    fragments = v_data.get("response", {}).get("fragments", [])
+                    for frag in fragments:
+                        if frag.get("type") == "RESPONSE":
+                            full_response += frag.get("content", "")
 
-        except json.JSONDecodeError:
-            pass
+                    response_data = v_data.get("response", {})
+                    if "message_id" in response_data:
+                        message_id = response_data["message_id"]
+                    elif "id" in v_data:
+                        message_id = v_data["id"]
+
+            except (json.JSONDecodeError, TypeError):
+                continue
+    except Exception:
+        pass
 
     return full_response, message_id
 
 
-
 def extract(text: str):
-    # 1. Убираем известный префикс, если он есть
+    if text is None:
+        raise ValueError("Пустой ответ модели")
+
+    text = text.strip()
+
     if text.startswith("SEARCH"):
         text = text[6:]
-    # 2. Убираем известный суффикс
     if text.endswith("FINISHED"):
         text = text[:-8]
-    # 3. Парсим
-    return json.loads(text)
 
+    text = text.strip()
 
+    # Снимаем markdown-обёртку ```json ... ```
+    if text.startswith("```"):
+        text = text[3:]
+        if text.lower().startswith("json"):
+            text = text[4:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Ответ модели не является валидным JSON: {e}\n{text[:500]}") from e
 
 
 prompt = """
@@ -162,7 +180,7 @@ args: { "path": "путь" }
 Путь отсчитывается от `cwd` (или от корня задачи при `cwd: null`)
 "w" - флаг на запись
 "a" - флаг на добавление в конец файла
-"n:k" - замещение строк с n по k, на content (с n включительно, по k не включительно)
+"n:k" - замещение строк с [n:k] включительно на content, нумерация начинается с 0, допустимы отрицательные индексы.
 
 # ПОРЯДОК ВЫПОЛНЕНИЯ ШАГА
 1. Система выполняет вызовы из `tools` по порядку.

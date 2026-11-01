@@ -39,25 +39,23 @@ class MessageWorker(QThread):
 
     def run(self):
         try:
-            while True:
+            max_steps = int(load_settings().get("max_steps", 30))
+            for _ in range(max_steps):
                 ans = self._api.send_message(self._text)
                 self.answer.emit(ans)
-                self.answer_text.emit(support.extract(ans).get("text"))
+                try:
+                    self.answer_text.emit(support.extract(ans).get("text") or "")
+                except Exception:
+                    self.answer_text.emit(ans)
                 response = self._api.execute()
                 if response[0] != "continue":
                     break
                 self._text = f"{response[0]}: {response[1]}"
                 self.answer.emit(self._text)
-                #print(self._text)
-
-
-
-
-
-
+            else:
+                self.error.emit(f"Превышен лимит шагов ({max_steps})")
         except Exception as e:
             self.error.emit(str(e))
-
 
 # =============================================================
 #  Настройки: файл + диалог
