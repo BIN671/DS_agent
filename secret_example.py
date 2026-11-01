@@ -1,2 +1,0 @@
-USER_TOKEN = ""
-DS_SESSION_ID = ""

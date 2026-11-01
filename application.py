@@ -1,4 +1,6 @@
 import sys
+import json
+import os
 
 
 import support
@@ -9,7 +11,8 @@ import traceback
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
     QLineEdit, QTextEdit, QLabel, QStackedWidget, QSplitter,
-    QListWidget, QListWidgetItem, QMessageBox, QMenu
+    QListWidget, QListWidgetItem, QMessageBox, QMenu,
+    QDialog, QDialogButtonBox, QFormLayout, QSpinBox
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
@@ -57,6 +60,76 @@ class MessageWorker(QThread):
 
 
 # =============================================================
+#  Настройки: файл + диалог
+# =============================================================
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+DEFAULT_SETTINGS = {
+    "api_timeout": 30,
+    "max_steps": 30,
+    "output_font_size": 12,
+}
+
+
+def load_settings() -> dict:
+    data = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data.update(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return data
+
+
+def save_settings(data: dict) -> None:
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+class SettingsDialog(QDialog):
+    """Диалог настроек. scope — 'dash' или имя сессии (для заголовка)."""
+
+    def __init__(self, parent=None, scope: str = "dash"):
+        super().__init__(parent)
+        self.setWindowTitle(f"Настройки — {scope}")
+        self.resize(360, 220)
+
+        self._settings = load_settings()
+
+        form = QFormLayout()
+
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 600)
+        self.timeout_spin.setValue(int(self._settings.get("api_timeout", 30)))
+        form.addRow("Таймаут API (сек):", self.timeout_spin)
+
+        self.steps_spin = QSpinBox()
+        self.steps_spin.setRange(1, 500)
+        self.steps_spin.setValue(int(self._settings.get("max_steps", 30)))
+        form.addRow("Макс. шагов:", self.steps_spin)
+
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(8, 32)
+        self.font_spin.setValue(int(self._settings.get("output_font_size", 12)))
+        form.addRow("Размер шрифта вывода:", self.font_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def result_settings(self) -> dict:
+        return {
+            "api_timeout": self.timeout_spin.value(),
+            "max_steps": self.steps_spin.value(),
+            "output_font_size": self.font_spin.value(),
+        }
+
+
+# =============================================================
 #  WorkspacePage — одна сессия
 # =============================================================
 class WorkspacePage(QWidget):
@@ -74,6 +147,8 @@ class WorkspacePage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.stack)
+
+        self.apply_settings()
 
     # ---------- Экран 0: Start ----------
     def _build_start_screen(self) -> QWidget:
@@ -101,6 +176,17 @@ class WorkspacePage(QWidget):
     def _build_main_screen(self) -> QWidget:
         screen = QWidget()
         layout = QVBoxLayout(screen)
+
+        # --- шапка сессии с кнопкой настроек ---
+        header = QHBoxLayout()
+        header.addWidget(QLabel(self.title))
+        header.addStretch()
+        self.session_settings_button = QPushButton("⚙ Настройки")
+        self.session_settings_button.setToolTip("Настройки этой сессии")
+        self.session_settings_button.clicked.connect(self.open_session_settings)
+        header.addWidget(self.session_settings_button)
+        layout.addLayout(header)
+
         splitter = QSplitter(Qt.Horizontal)
 
         left = QWidget()
@@ -128,6 +214,22 @@ class WorkspacePage(QWidget):
         splitter.setSizes([400, 400])
         layout.addWidget(splitter)
         return screen
+
+    # ---------- Настройки сессии ----------
+    def open_session_settings(self):
+        dlg = SettingsDialog(self, scope=self.title)
+        if dlg.exec() == QDialog.Accepted:
+            save_settings(dlg.result_settings())
+            self.apply_settings()
+
+    def apply_settings(self):
+        s = load_settings()
+        size = int(s.get("output_font_size", 12))
+        # применяем только если экран уже построен
+        if hasattr(self, "output") and self.output is not None:
+            self.output.setStyleSheet(f"font-size: {size}px;")
+        if hasattr(self, "output_text") and self.output_text is not None:
+            self.output_text.setStyleSheet(f"font-size: {size}px;")
 
     # ---------- Start: блокирующий, без потока ----------
     def on_start(self):
@@ -237,6 +339,12 @@ class MainWindow(QWidget):
         self.remove_button.clicked.connect(self.remove_current_session)
         buttons_row.addWidget(self.remove_button)
 
+        self.settings_button = QPushButton("⚙")
+        self.settings_button.setFixedSize(36, 28)
+        self.settings_button.setToolTip("Настройки")
+        self.settings_button.clicked.connect(self.open_settings)
+        buttons_row.addWidget(self.settings_button)
+
         buttons_row.addStretch()
         left_layout.addLayout(buttons_row)
 
@@ -302,6 +410,16 @@ class MainWindow(QWidget):
         item = self.list_widget.item(row)
         page_index = item.data(Qt.UserRole)
         self.pages.setCurrentIndex(page_index)
+
+    def open_settings(self):
+        dlg = SettingsDialog(self, scope="dash-board")
+        if dlg.exec() == QDialog.Accepted:
+            save_settings(dlg.result_settings())
+            # применить ко всем сессиям
+            for i in range(self.pages.count()):
+                w = self.pages.widget(i)
+                if hasattr(w, "apply_settings"):
+                    w.apply_settings()
 
     def _show_context_menu(self, pos):
         item = self.list_widget.itemAt(pos)

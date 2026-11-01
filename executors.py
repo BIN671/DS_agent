@@ -2,8 +2,9 @@
 import subprocess
 import os
 
-def bash(cwd:str|None=None):
-    def run(cmd:str, timeout_s: int = 60):
+
+def bash(cwd: str | None = None):
+    def run(cmd: str, timeout_s: int = 60):
         try:
             proc = subprocess.run(
                 cmd,
@@ -14,14 +15,15 @@ def bash(cwd:str|None=None):
                 text=True,
                 encoding="cp866",
                 errors="replace",
-                timeout=timeout_s,)
+                timeout=timeout_s, )
             return f"returncode: {proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
         except subprocess.TimeoutExpired as e:
             return f"{str(e)}\nstdout: {e.stdout}\nstderr: {e.stderr}"
+
     return run
 
 
-def read(cwd:str|None=None):
+def read(cwd: str | None = None):
     def run(path: str):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -31,8 +33,9 @@ def read(cwd:str|None=None):
 
     return run
 
-def write(cwd:str|None=None):
-    def run(path: str, content: str):
+
+def write(cwd: str | None = None):
+    def run(path: str, content: str, splt: str = "w"):
         try:
             if cwd:
                 full_path = os.path.join(cwd, path)
@@ -42,15 +45,54 @@ def write(cwd:str|None=None):
             # Создаем папки, если их нет
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
-            with open(full_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            if "a" == splt:
+                with open(full_path, "a", encoding="utf-8") as f:
+                    f.write(content)
 
+
+            elif "w" == splt:
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+
+            else:
+                if splt.startswith(":"):
+                    bound = int(splt[1:])
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    lines[:bound] = [content]
+                    with open(full_path, "w", encoding='utf-8') as f:
+                        f.writelines(lines)
+
+
+                elif splt.endswith(":"):
+                    bound = int(splt[:-1])
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    lines[bound:] = [content]
+                    with open(full_path, "w", encoding='utf-8') as f:
+                        f.writelines(lines)
+
+
+                else:
+                    bounds = tuple(map(int, splt.split(":")))
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    lines[bounds[0]:bounds[1]] = [content]
+                    with open(full_path, "w", encoding='utf-8') as f:
+                        f.writelines(lines)
             return f"Файл {full_path} успешно записан"
+
         except Exception as e:
             return f"{str(e)}\nstdout: {e.stdout}\nstderr: {e.stderr}"
 
     return run
-
 
 
 executors_table = {
