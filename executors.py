@@ -1,6 +1,13 @@
 import subprocess
 import os
 
+ALLOWED_APPS = {
+    "paint": "mspaint.exe",
+
+    #"cmd": "cmd.exe",
+    "browser": "start https://www.google.com" # Можно открывать сайты
+
+}
 
 def _safe_err(e) -> str:
     """Безопасно формирует текст ошибки (у исключений нет .stdout/.stderr)."""
@@ -105,8 +112,35 @@ def write(cwd: str | None = None):
     return run
 
 
+def open_app(cwd: str | None = None):
+    def run(app_name: str):
+        # 1. Приводим имя к нижнему регистру (чтобы "Paint" и "paint" работали одинаково)
+        app_key = app_name.lower().strip()
+
+        # 2. Проверяем по белому списку
+        if app_key not in ALLOWED_APPS:
+            return f"Ошибка: Приложение '{app_name}' не разрешено. Доступные приложения: {', '.join(ALLOWED_APPS.keys())}"
+
+        command = ALLOWED_APPS[app_key]
+
+        try:
+            # 3. Запускаем программу (Popen не блокирует выполнение кода)
+            if command.startswith("start "):
+                # Для открытия сайтов в браузере
+                subprocess.Popen(command, shell=True)
+            else:
+                # Для обычных программ
+                subprocess.Popen(command)
+
+            return f"Успешно: приложение '{app_name}' запущено."
+        except Exception as e:
+            return f"Ошибка при запуске {app_name}: {e}"
+
+    return run
+
 executors_table = {
     "bash": bash,
     "read": read,
     "write": write,
+    "open_app": open_app
 }
