@@ -70,7 +70,13 @@ def extract(text: str):
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Ответ модели не является валидным JSON: {e}\n{text[:500]}") from e
+        return {
+            "tools": [],
+            "return": [],
+            "status": "done",
+            "text": text  # Сохраняем сырой текст, чтобы UI мог его показать
+        }
+        #raise ValueError(f"Ответ модели не является валидным JSON: {e}\n{text[:500]}") from e
 
 
 prompt = """
@@ -97,7 +103,7 @@ prompt = """
   "text": "что увидит пользователь (может быть пустой строкой)",
   "tools": [
     {
-      "name": "bash" | "read" | "write",
+      "name": "bash" | "read" | "write" | "open_app",
       "args": { ... },
       "cwd": "путь" | null,
       "save_as": "ключ" | null
@@ -181,6 +187,12 @@ args: { "path": "путь" }
 "w" - флаг на запись
 "a" - флаг на добавление в конец файла
 "n:k" - замещение строк с [n:k] включительно на content, нумерация начинается с 0, допустимы отрицательные индексы.
+
+## open_app
+Открыть приложение на компьютере пользователя.
+args: { "app_name": "имя_программы" }
+Доступные программы: paint,  browser
+Используй, если пользователь просит открыть программу.
 
 # ПОРЯДОК ВЫПОЛНЕНИЯ ШАГА
 1. Система выполняет вызовы из `tools` по порядку.
