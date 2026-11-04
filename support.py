@@ -1,4 +1,6 @@
+import copy
 import json
+import re
 
 
 def parse_sse_response(response) -> tuple[str, int | None]:
@@ -45,20 +47,155 @@ def parse_sse_response(response) -> tuple[str, int | None]:
     return full_response, message_id
 
 
+# ---------- Вспомогательные функции ----------
+
+def _fix_esc(s: str) -> str:
+    r"""Экранирует невалидные \X (X не из " \ / b f n r t u)."""
+    return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
+
+
+def _fix_ctrl(s: str) -> str:
+    r"""Сырые control-символы (< 0x20) → \uXXXX."""
+    return re.sub(r'[\x00-\x1f]', lambda m: '\\u%04x' % ord(m.group()), s)
+
+
+def _fix_quotes(s: str) -> str:
+    r"""
+    Эвристика: экранирует «голые» кавычки внутри значений-строк JSON.
+    Открывающая кавычка значения — после ':' (с пробелами).
+    Закрывающая — та, после которой идёт , } ] или конец строки.
+    """
+    out = []
+    i = 0
+    n = len(s)
+    in_value = False
+
+    while i < n:
+        ch = s[i]
+
+        if not in_value:
+            if ch == ':':
+                out.append(ch)
+                i += 1
+                while i < n and s[i] in ' \t\r\n':
+                    out.append(s[i])
+                    i += 1
+                if i < n and s[i] == '"':
+                    out.append('"')
+                    i += 1
+                    in_value = True
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        # внутри значения-строки
+        if ch == '\\':
+            out.append(ch)
+            if i + 1 < n:
+                out.append(s[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if ch == '"':
+            j = i + 1
+            while j < n and s[j] in ' \t\r\n':
+                j += 1
+            if j >= n or s[j] in ',}]':
+                out.append('"')
+                in_value = False
+                i += 1
+                continue
+            out.append('\\"')
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return ''.join(out)
+
+
+def _first_obj(s: str):
+    r"""Первый сбалансированный JSON-объект {...} с учётом строк и escape."""
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i + 1]
+    return None
+
+
+def _try_parse(s: str):
+    variants = []
+
+    def add(v):
+        if v not in variants:
+            variants.append(v)
+
+    add(s)
+    add(_fix_esc(s))
+    add(_fix_ctrl(s))
+    add(_fix_esc(_fix_ctrl(s)))
+    add(_fix_quotes(s))
+    add(_fix_esc(_fix_quotes(s)))
+    add(_fix_quotes(_fix_esc(s)))
+    add(_fix_esc(_fix_ctrl(_fix_quotes(s))))
+
+    for v in variants:
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            pass
+
+    for v in variants:
+        obj = _first_obj(v)
+        if not obj:
+            continue
+        for cand in (obj, _fix_esc(obj), _fix_quotes(obj),
+                     _fix_esc(_fix_quotes(obj)),
+                     _fix_esc(_fix_ctrl(_fix_quotes(obj)))):
+            try:
+                return json.loads(cand)
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+# ---------- Основная функция ----------
+
 def extract(text: str):
     if text is None:
         raise ValueError("Пустой ответ модели")
 
+    raw = copy.copy(text)
     text = text.strip()
 
     if text.startswith("SEARCH"):
         text = text[6:]
-    if text.endswith("FINISHED"):
-        text = text[:-8]
+    text = re.sub(r'\s*FINISHED\s*$', '', text)
 
-    text = text.strip()
-
-    # Снимаем markdown-обёртку ```json ... ```
     if text.startswith("```"):
         text = text[3:]
         if text.lower().startswith("json"):
@@ -67,16 +204,13 @@ def extract(text: str):
             text = text[:-3]
         text = text.strip()
 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        return {
-            "tools": [],
-            "return": [],
-            "status": "done",
-            "text": text  # Сохраняем сырой текст, чтобы UI мог его показать
-        }
-        #raise ValueError(f"Ответ модели не является валидным JSON: {e}\n{text[:500]}") from e
+    result = _try_parse(text)
+    if result is not None:
+        return result
+
+    print("ответ не валидный json")
+    print("repr(raw)[:300]:", repr(raw)[:300])
+    return {"tools": [], "return": [], "status": "done", "text": text}
 
 
 prompt = """
@@ -111,6 +245,45 @@ prompt = """
   ],
   "return": ["ключ1", "ключ2"],
   "status": "continue" | "done" | "error"
+}
+
+Ровно один JSON-объект. Каждое поле (`thought`, `text`, `tools`, `return`,
+`status`) встречается РОВНО ОДИН РАЗ. Запрещено дублировать поля, закрывающие
+скобки и хвостовые фрагменты. Если сомневаешься — упрости ответ, но не повторяй
+структуру.
+
+# САМОКОНТРОЛЬ ПЕРЕД ОТПРАВКОЙ
+Перед отправкой мысленно проверь:
+(а) ответ начинается с `{` и заканчивается `}`;
+(б) скобки сбалансированы;
+(в) нет текста до/после JSON;
+(г) нет повторного `], "return": ...`.
+
+# ЭТАЛОННЫЕ ШАБЛОНЫ (КОПИРУЙ СТРУКТУРУ)
+
+Шаг `continue` (пример):
+{
+  "thought": "Нужно прочитать файл, чтобы узнать его содержимое.",
+  "text": "Читаю файл…",
+  "tools": [
+    {
+      "name": "read",
+      "args": { "path": "notes.txt" },
+      "cwd": null,
+      "save_as": "file_content"
+    }
+  ],
+  "return": ["file_content"],
+  "status": "continue"
+}
+
+Шаг `done` (пример):
+{
+  "thought": "Задача выполнена, итог сформулирован.",
+  "text": "Готово: файл прочитан, содержимое — '...'.",
+  "tools": [],
+  "return": [],
+  "status": "done"
 }
 
 # ПРАВИЛА ПОЛЕЙ

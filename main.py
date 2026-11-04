@@ -129,6 +129,7 @@ class DeepSeek_API:
 
     # ---- отправка сообщения ----
     def send_message(self, prompt):
+        print(self.pre_message_id, )
         pow_header = self.get_pow_challenge()
         extra_header = {"x-ds-pow-response": pow_header}
 
@@ -143,25 +144,41 @@ class DeepSeek_API:
             "preempt": False,
             "model_type": self.model,
         }
-        # после первого запроса модель фиксируется как строка, а не None
         self.model = self.model or "default"
 
         with self.client.stream(
-            "POST",
-            f"{self.base_url}/api/v0/chat/completion",
-            headers=extra_header,
-            json=payload,
+                "POST",
+                f"{self.base_url}/api/v0/chat/completion",
+                headers=extra_header,
+                json=payload,
         ) as response:
             if response.status_code != 200:
                 body = response.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"HTTP {response.status_code}: {body[:500]}")
 
+            # --- ПЕЧАТЬ: статус + заголовки (до чтения тела) ---
+            print("=" * 60)
+            print(f"STATUS: {response.status_code}")
+            print(f"URL: {response.url}")
+            print("HEADERS:")
+            for k, v in response.headers.items():
+                print(f"  {k}: {v}")
+            print("BODY (raw SSE) будет напечатан построчно ниже:")
+            # --- КОНЕЦ ПЕЧАТИ ---
+
             self.ans, self.pre_message_id = support.parse_sse_response(response)
+
+            print("=" * 60)
+            print(f"PARSED ANSWER: {self.ans!r}")
+            print(f"NEW pre_message_id: {self.pre_message_id}")
+            print("=" * 60)
+
             return self.ans
 
     # ---- исполнение инструментов ----
     def execute(self):
         if self.ans is None:
+            print("ответ не получен")
             return "error", "Нет ответа модели для разбора"
 
         try:
