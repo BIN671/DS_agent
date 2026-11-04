@@ -128,8 +128,12 @@ class DeepSeek_API:
         return base64.b64encode(raw_json).decode("utf-8")
 
     # ---- отправка сообщения ----
-    def send_message(self, prompt):
-        print(self.pre_message_id, )
+    def send_message(self, prompt, master=True, _retries=3):
+        print(self.pre_message_id)
+
+        # Фиксируем модель ДО сборки payload
+        self.model = self.model or "default"
+
         pow_header = self.get_pow_challenge()
         extra_header = {"x-ds-pow-response": pow_header}
 
@@ -143,8 +147,8 @@ class DeepSeek_API:
             "action": None,
             "preempt": False,
             "model_type": self.model,
+            "shumei_device_id": "BXtqxQpYwbwmQJ4XNTSkZ1zdx6VKEjfM3oYUI0ZuReztNUfZHQEtelinyc05c+lkbCRSiuuZnihhE6swCriHP1Q=",
         }
-        self.model = self.model or "default"
 
         with self.client.stream(
                 "POST",
@@ -156,24 +160,35 @@ class DeepSeek_API:
                 body = response.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"HTTP {response.status_code}: {body[:500]}")
 
-            # --- ПЕЧАТЬ: статус + заголовки (до чтения тела) ---
             print("=" * 60)
             print(f"STATUS: {response.status_code}")
             print(f"URL: {response.url}")
             print("HEADERS:")
             for k, v in response.headers.items():
                 print(f"  {k}: {v}")
-            print("BODY (raw SSE) будет напечатан построчно ниже:")
-            # --- КОНЕЦ ПЕЧАТИ ---
-
-            self.ans, self.pre_message_id = support.parse_sse_response(response)
-
-            print("=" * 60)
-            print(f"PARSED ANSWER: {self.ans!r}")
-            print(f"NEW pre_message_id: {self.pre_message_id}")
             print("=" * 60)
 
+            # Парсим ОДИН раз
+            ans, new_id = support.parse_sse_response(response)
+
+            print(f"PARSED ANSWER: {ans!r}")
+            print(f"NEW pre_message_id: {new_id}")
+            print("=" * 60)
+
+        if new_id is not None and ans:
+            # Успех: обновляем состояние и возвращаем
+            self.ans = ans
+            self.pre_message_id = new_id
             return self.ans
+
+        # Пустой поток — известный сбой DeepSeek
+        if master and _retries > 0:
+            import time
+            time.sleep(10)
+            return self.send_message(prompt, master=True, _retries=_retries - 1)
+
+        return None  # или raise RuntimeError("EMPTY_STREAM")
+
 
     # ---- исполнение инструментов ----
     def execute(self):
