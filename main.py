@@ -3,6 +3,11 @@ import json
 import base64
 import traceback
 
+import os
+import time
+import mimetypes
+import uuid
+
 import executors
 import POW
 import support
@@ -98,8 +103,7 @@ class DeepSeek_API:
         return self.create_session()
 
     # ---- PoW ----
-    def get_pow_challenge(self):
-        target_path: str = "/api/v0/chat/completion"
+    def get_pow_challenge(self, target_path: str = "/api/v0/chat/completion"):
         response = self.client.post(
             f"{self.base_url}/api/v0/chat/create_pow_challenge",
             json={"target_path": target_path},
@@ -127,21 +131,149 @@ class DeepSeek_API:
         raw_json = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         return base64.b64encode(raw_json).decode("utf-8")
 
+    def upload_image(self, image_path: str) -> str:
+        """Загружает картинку и возвращает file_id, готовый для прикрепления к сообщению."""
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Файл не найден: {image_path}")
+
+        # 1. Получаем PoW
+        pow_header = self.get_pow_challenge("/api/v0/file/upload_file")
+
+        # 2. Читаем файл
+        with open(image_path, "rb") as f:
+            file_content = f.read()
+        file_size = len(file_content)
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        # Делаем имя файла безопасным (убираем кириллицу, если она ломает парсер)
+        import urllib.parse
+        filename = urllib.parse.quote(os.path.basename(image_path))
+
+        import uuid
+        boundary = "----WebKitFormBoundary" + uuid.uuid4().hex
+
+        # 3. Вручную формируем тело запроса
+        body = b""
+        # СНАЧАЛА ФАЙЛ
+        body += f"--{boundary}\r\n".encode("utf-8")
+        body += f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode("utf-8")
+        body += f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8")
+        body += file_content
+        body += b"\r\n"
+
+        # ПОТОМ PURPOSE
+        body += f"--{boundary}\r\n".encode("utf-8")
+        body += b'Content-Disposition: form-data; name="purpose"\r\n\r\n'
+        body += b"user_data\r\n"
+
+        # КОНЕЦ
+        body += f"--{boundary}--\r\n".encode("utf-8")
+
+        # 4. Заголовки
+        upload_headers = {
+            "Authorization": f"Bearer {self.user_token}",
+            "Cookie": f"ds_session_id={self.session_cookie}",
+            "User-Agent": self.headers["User-Agent"],
+            "x-ds-pow-response": pow_header,
+            "x-file-size": str(file_size),
+            "x-model-type": "vision",
+            "x-thinking-enabled": "false",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        }
+
+        # 5. Отправляем через ЧИСТЫЙ клиент, чтобы self.headers не мешали
+        with httpx.Client(http2=True) as clean_client:
+            upload_resp = clean_client.post(
+                f"{self.base_url}/api/v0/file/upload_file",
+                content=body,
+                headers=upload_headers
+            )
+
+        print(f"DEBUG [upload_file] Status: {upload_resp.status_code}")
+        print(f"DEBUG [upload_file] Response: {upload_resp.text}")
+
+        upload_data = upload_resp.json()
+        data_dict = upload_data.get("data")
+        if data_dict is None:
+            raise Exception(f"Сервер вернул null в 'data'. Ответ: {upload_data}")
+
+        file_id = data_dict.get("biz_data", {}).get("id")
+        if not file_id:
+            raise Exception(f"Не удалось найти file_id. Ответ: {upload_data}")
+
+        # --- ФОРК ФАЙЛА (С ИСПРАВЛЕНИЕМ) ---
+        vision_file_id = file_id  # По умолчанию используем оригинальный ID
+
+        fork_resp = self.client.post(
+            f"{self.base_url}/api/v0/file/fork_file_task",
+            json={"file_id": file_id, "to_model_type": "vision"}
+        )
+
+        print(f"DEBUG [fork_file_task] Status: {fork_resp.status_code}")
+        print(f"DEBUG [fork_file_task] Response: {fork_resp.text}")
+
+        if fork_resp.status_code == 200:
+            fork_data = fork_resp.json()
+            fork_biz_data = fork_data.get("data", {}).get("biz_data")
+
+            # Если форк прошел успешно и вернул новый ID, берем его
+            if fork_biz_data and fork_biz_data.get("id"):
+                vision_file_id = fork_biz_data.get("id")
+            else:
+                # Если biz_msg == "model kind satisfied", оставляем оригинальный file_id
+                print("DEBUG: Форк не требуется, используем оригинальный file_id.")
+
+        # --- ОЖИДАНИЕ ПАРСИНГА (POLLING) ---
+        max_attempts = 15
+        for attempt in range(max_attempts):
+            fetch_resp = self.client.get(
+                f"{self.base_url}/api/v0/file/fetch_files",
+                params={"file_ids": str(vision_file_id)}  # Убедимся, что это строка
+            )
+
+            if fetch_resp.status_code == 200:
+                fetch_data = fetch_resp.json()
+                # Достаем список файлов (он может быть в разных местах в зависимости от версии API)
+                biz_data = fetch_data.get("data", {}).get("biz_data", {})
+                files_list = biz_data.get("files", [])
+
+                # Если вдруг сервер вернул не список, а один объект
+                if not files_list and biz_data.get("id") == vision_file_id:
+                    files_list = [biz_data]
+
+                for f_info in files_list:
+                    if f_info.get("id") == vision_file_id:
+                        status = f_info.get("status")
+                        print(f"DEBUG: Статус файла {vision_file_id}: {status}")
+
+                        if status == "SUCCESS":
+                            return vision_file_id
+                        elif status in ["FAILED", "CONTENT_EMPTY"]:
+                            raise Exception(f"Ошибка парсинга картинки: {status}")
+
+            time.sleep(1)
+
+        raise TimeoutError("Сервер слишком долго обрабатывает картинку.")
+
     # ---- отправка сообщения ----
-    def send_message(self, prompt, master=True, _retries=3):
+    def send_message(self, prompt, file_ids: list[str] = None, master=True, _retries=3):
         print(self.pre_message_id)
 
-        # Фиксируем модель ДО сборки payload
-        self.model = self.model or "default"
+        if file_ids:
+            current_model = "vision"
+        else:
+            current_model = self.model or "default"
 
-        pow_header = self.get_pow_challenge()
+        pow_header = self.get_pow_challenge("/api/v0/chat/completion")
         extra_header = {"x-ds-pow-response": pow_header}
 
         payload = {
             "chat_session_id": self.session_id,
             "parent_message_id": self.pre_message_id,
             "prompt": prompt,
-            "ref_file_ids": [],
+            "ref_file_ids": file_ids if file_ids else [],
             "thinking_enabled": False,
             "search_enabled": True,
             "action": None,

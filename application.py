@@ -1,7 +1,7 @@
 import sys
 import os
 import json
-
+from PySide6.QtWidgets import QFileDialog
 import support
 from main import DeepSeek_API
 from support import prompt
@@ -395,24 +395,57 @@ class MessageWorker(QThread):
     error = Signal(str)
     answer_text = Signal(str)
 
-    def __init__(self, api, text: str, parent=None):
+    def __init__(self, api, text: str, image_path: str = None, parent=None):
         super().__init__(parent)
         self._api = api
         self._text = text
+        self._image_path = image_path
 
     def run(self):
         try:
+            file_ids = None
+
+            #Если пользователь прикрепил картинку — загружаем её
+            if self._image_path:
+                self.answer.emit("system: Загрузка изображения на сервер...")
+                try:
+                    file_id = self._api.upload_image(self._image_path)
+                    file_ids = [file_id]
+                    self.answer.emit("system: Изображение успешно загружено.")
+                except Exception as e:
+                    self.error.emit(f"Ошибка загрузки картинки: {e}")
+                    return
+
+            is_first_message = True
+
             while True:
-                ans = self._api.send_message(self._text)
+                # Передаем file_ids только в ПЕРВОМ сообщении.
+                # В последующих шагах (когда уходят результаты инструментов)
+                # картинка уже не нужна, там только текст.
+                current_files = file_ids if is_first_message else None
+
+                ans = self._api.send_message(self._text, file_ids=current_files)
+                is_first_message = False  # Выключаем флаг после первого круга
+
                 print("step1")
                 self.answer.emit(f"deepseek: {ans}")
-                self.answer_text.emit(support.extract(ans).get("text", ""))
+
+                # Безопасно извлекаем текст
+                try:
+                    extracted_text = support.extract(ans).get("text", "")
+                    self.answer_text.emit(extracted_text)
+                except Exception:
+                    pass
+
                 print("step2")
                 response = self._api.execute()
+
                 if response[0] != "continue":
                     break
+
                 self._text = f"{response[0]}: {response[1]}"
                 self.answer.emit(f"system: {self._text}")
+
         except Exception as e:
             self.error.emit(str(e))
 
@@ -500,6 +533,7 @@ class WorkspacePage(QWidget):
         self.title = title
         self.api = None
         self._worker = None
+        self.selected_image_path = None
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_start_screen())
@@ -634,6 +668,15 @@ class WorkspacePage(QWidget):
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
 
+        # ДОБАВЛЯЕМ КНОПКУ ДЛЯ КАРТИНКИ:
+        self.attach_button = QPushButton("📎")
+        self.attach_button.setObjectName("IconBtn")
+        self.attach_button.setFixedSize(40, 44)
+        self.attach_button.setCursor(Qt.PointingHandCursor)
+        self.attach_button.setToolTip("Прикрепить изображение")
+        self.attach_button.clicked.connect(self.on_attach_image)
+        input_row.addWidget(self.attach_button)
+
         self.entry = QLineEdit()
         self.entry.setPlaceholderText("Введите сообщение и нажмите Enter…")
         self.entry.setMinimumHeight(44)
@@ -670,6 +713,19 @@ class WorkspacePage(QWidget):
         splitter.setSizes([660, 360])
         layout.addWidget(splitter, stretch=1)
         return screen
+
+    def on_attach_image(self):
+        # Открываем диалог выбора файла
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите изображение", "", "Изображения (*.png *.jpg *.jpeg *.webp)"
+        )
+        if file_path:
+            self.selected_image_path = file_path
+            self.attach_button.setText("🖼️")
+            self.attach_button.setStyleSheet(f"color: {C.success};")
+
+            filename = file_path.split("/")[-1]
+            self._add_note(f"Прикреплено: {filename}", C.accent)
 
     # ---------- Состояние ----------
     def _set_state(self, text: str, color: str):
@@ -765,20 +821,26 @@ class WorkspacePage(QWidget):
     # ---------- Enter ----------
     def on_enter(self):
         text = self.entry.text()
-        if not text.strip():
+        if not text.strip() and not self.selected_image_path:
             return
         if self._worker is not None and self._worker.isRunning():
             return
 
         self.entry.setEnabled(False)
         self.send_button.setEnabled(False)
+        self.attach_button.setEnabled(False)
         self.entry.setPlaceholderText("Ожидание ответа…")
         self._set_state("Думает…", C.accent)
 
         self.output.append(f"> Пользователь:\n{text}\n")
         self._add_bubble(text, "user")
 
-        self._worker = MessageWorker(self.api, text, parent=self)
+        self._worker = MessageWorker(
+            self.api,
+            text,
+            image_path=self.selected_image_path,  # <--- ДОБАВЛЯЕМ ЭТО
+            parent=self
+        )
         self._worker.answer.connect(self._on_message_answer)
         self._worker.answer_text.connect(self._on_message_answer_text)
         self._worker.error.connect(self._on_message_error)
@@ -806,6 +868,13 @@ class WorkspacePage(QWidget):
         self._set_state("Готово", C.success)
         self.entry.setEnabled(True)
         self.send_button.setEnabled(True)
+
+        # ДОБАВЛЯЕМ СБРОС СОСТОЯНИЯ КАРТИНКИ:
+        self.attach_button.setEnabled(True)
+        self.attach_button.setText("📎")
+        self.attach_button.setStyleSheet("")
+        self.selected_image_path = None
+
         self.entry.setPlaceholderText("Введите сообщение и нажмите Enter…")
         self.entry.clear()
         self.entry.setFocus()
